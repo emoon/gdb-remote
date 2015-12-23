@@ -1,0 +1,4 @@
+[root]
+name = "gdb-remote"
+version = "0.1.0"
+
