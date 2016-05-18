@@ -106,15 +106,9 @@ impl GdbRemote {
 
     pub fn connect(&mut self, addr: &str) -> io::Result<()> {
         let stream = try!(TcpStream::connect(addr));
-        // 2 sec of time-out to make sure we never gets infitite blocked
         try!(stream.set_read_timeout(Some(Duration::from_secs(2))));
         self.stream = Some(stream);
-        self.connect_internal()
-    }
-
-    pub fn connect_internal(&mut self) -> io::Result<()> {
-        // Handshake with the server
-    
+        // 2 sec of time-out to make sure we never gets infitite blocked
         Ok(())
     }
 
@@ -192,6 +186,10 @@ impl GdbRemote {
         Ok((len - 3))
     }
 
+    pub fn get_supported(&mut self, res: &mut [u8]) -> io::Result<usize> {
+        self.send_command_wait_reply_raw(res, "qSupported")
+    }
+
 
     //pub fn send_no_ack_request(&mut self)-> io::Result<usize> {
     //}
@@ -263,14 +261,12 @@ mod tests {
     use std::thread;
     use std::net::{TcpStream, TcpListener};
     use std::sync::{Arc, Mutex};
+    use std::io::{Read};
     use std::time::Duration;
 
-    #[allow(dead_code)] 
-    enum ServerState {
-        NotStarted,
-        Started,
-        ReplyCorrect,
-    }
+    const NOT_STARTED: u32 = 0;
+    const STARTED: u32 = 1;
+    const REPLY_SUPPORT: u32 = 2;
 
     #[test]
     fn test_checksum_calc() {
@@ -295,6 +291,10 @@ mod tests {
         *data = value
     }
 
+    fn get_mutex_value(mutex: &Arc<Mutex<u32>>) -> u32 {
+        *mutex.lock().unwrap()
+    }
+
     fn wait_for_thread_init(mutex: &Arc<Mutex<u32>>) {
         loop {
             if check_mutex_complete(mutex) {
@@ -305,7 +305,7 @@ mod tests {
         }
     }
 
-    fn setup_listener(server_lock: &Arc<Mutex<u32>>, state: ServerState) {
+    fn setup_listener(server_lock: &Arc<Mutex<u32>>, state: u32) {
         let listener = TcpListener::bind("127.0.0.1:6860").unwrap();
         update_mutex(&server_lock, state as u32);
 
@@ -319,11 +319,10 @@ mod tests {
         }
     }
 
-    fn server(_stream: TcpStream, _state: &Arc<Mutex<u32>>) {
-        loop {
-            // do severy things here
-            thread::sleep(Duration::from_millis(1));
-        }
+    fn server(mut stream: TcpStream, state: &Arc<Mutex<u32>>) {
+        let mut buffer = [0; 1024];
+        let _value = get_mutex_value(state);
+        stream.read(&mut buffer).unwrap();
     }
 
     #[test]
@@ -331,8 +330,19 @@ mod tests {
         let lock = Arc::new(Mutex::new(0));
         let thread_lock = lock.clone();
 
-        thread::spawn(move || { setup_listener(&thread_lock, ServerState::Started) });
-        // make sure we have spawned the server before we go on
+        thread::spawn(move || { setup_listener(&thread_lock, STARTED) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.connect("127.0.0.1:6860").unwrap();
+    }
+
+    #[test]
+    fn test_qsupported() {
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+        thread::spawn(move || { setup_listener(&thread_lock, STARTED) });
         wait_for_thread_init(&lock);
 
         let mut gdb = GdbRemote::new();
