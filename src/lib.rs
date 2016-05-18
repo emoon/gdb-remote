@@ -261,9 +261,16 @@ impl GdbRemote {
 mod tests {
     use super::*;
     use std::thread;
-    use std::net::TcpListener;
+    use std::net::{TcpStream, TcpListener};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    #[allow(dead_code)] 
+    enum ServerState {
+        NotStarted,
+        Started,
+        ReplyCorrect,
+    }
 
     #[test]
     fn test_checksum_calc() {
@@ -280,7 +287,7 @@ mod tests {
 
     fn check_mutex_complete(mutex: &Arc<Mutex<u32>>) -> bool {
         let data = mutex.lock().unwrap();
-        if *data == 1 { true } else { false }
+        if *data != 0 { true } else { false }
     }
 
     fn update_mutex(mutex: &Arc<Mutex<u32>>, value: u32) {
@@ -298,31 +305,36 @@ mod tests {
         }
     }
 
+    fn setup_listener(server_lock: &Arc<Mutex<u32>>, state: ServerState) {
+        let listener = TcpListener::bind("127.0.0.1:6860").unwrap();
+        update_mutex(&server_lock, state as u32);
+
+        loop {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => server(stream, server_lock),
+                    _ => (),
+                }
+            }
+        }
+    }
+
+    fn server(_stream: TcpStream, _state: &Arc<Mutex<u32>>) {
+        loop {
+            // do severy things here
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn test_connect() {
         let lock = Arc::new(Mutex::new(0));
         let thread_lock = lock.clone();
 
-
-        thread::spawn(move || {
-            let listener = TcpListener::bind("127.0.0.1:6860").unwrap();
-            update_mutex(&thread_lock, 1);
-
-            loop {
-                for stream in listener.incoming() {
-                    match stream {
-                        Ok(_stream) => {
-                            // do more stuff in here 
-                        }
-
-                        _ => (),
-                    }
-                }
-            }
-        });
-
+        thread::spawn(move || { setup_listener(&thread_lock, ServerState::Started) });
         // make sure we have spawned the server before we go on
         wait_for_thread_init(&lock);
+
         let mut gdb = GdbRemote::new();
         gdb.connect("127.0.0.1:6860").unwrap();
     }
