@@ -1,7 +1,7 @@
 use std::net::TcpStream;
 use std::io::{Read, Write};
 use std::io;
-use std::thread;
+use std::time::Duration;
 
 pub enum NeedsAck {
     Yes,
@@ -21,7 +21,6 @@ pub struct GdbRemote {
     stream: Option<TcpStream>,
     temp_string: String,
     needs_ack: NeedsAck,
-    packet_size: usize,
 }
 
 pub struct Memory {
@@ -69,12 +68,17 @@ fn from_hex(ch: u8) -> u8 {
     0
 }
 
+fn from_pair_hex(data: (u8, u8)) -> u8 {
+    let t0 = from_hex(data.0);
+    let t1 = from_hex(data.1);
+    (t0 << 4) | t1
+}
+
 impl GdbRemote {
     pub fn new() -> GdbRemote {
         GdbRemote {
             needs_ack: NeedsAck::Yes,
             temp_string: String::with_capacity(PACKET_SIZE + 4), // + 4 for header and checksum
-            packet_size: PACKET_SIZE,
             stream: None,
         }
     }
@@ -102,7 +106,15 @@ impl GdbRemote {
 
     pub fn connect(&mut self, addr: &str) -> io::Result<()> {
         let stream = try!(TcpStream::connect(addr));
+        // 2 sec of time-out to make sure we never gets infitite blocked
+        try!(stream.set_read_timeout(Some(Duration::from_secs(2))));
         self.stream = Some(stream);
+        self.connect_internal()
+    }
+
+    pub fn connect_internal(&mut self) -> io::Result<()> {
+        // Handshake with the server
+    
         Ok(())
     }
 
@@ -118,18 +130,68 @@ impl GdbRemote {
         dest.push(csum.1 as char);
     }
 
-    pub fn send_command(&mut self, data: &str) -> io::Result<()> {
-        Self::build_processed_string(&mut self.temp_string, data);
-        self.send_command_raw()
-    }
-
-    pub fn send_command_raw(&mut self) -> io::Result<()> {
+    pub fn send_internal(&mut self) -> io::Result<()> {
         if let Some(ref mut stream) = self.stream {
             stream.write_all(self.temp_string.as_bytes())
         } else {
-            Ok(())
+            Err(io::Error::new(io::ErrorKind::Other, "No connection with a server."))
         }
     }
+
+    pub fn send_command(&mut self, data: &str) -> io::Result<()> {
+        Self::build_processed_string(&mut self.temp_string, data);
+        self.send_internal()
+    }
+
+    fn handle_send_ack(stream: &mut TcpStream, resend_data: &String, dest: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let mut v = [0; 1];
+            try!(stream.read(&mut v));
+
+            match v[0] {
+                b'+' => return stream.read(dest),
+                b'-' => try!(stream.write_all(resend_data.as_bytes())),
+                _ => {
+                    return Err(io::Error::new(io::ErrorKind::Other, "Illegal reply from server."))
+                }
+            }
+        }
+    }
+
+    pub fn read_reply(&mut self, dest: &mut [u8]) -> io::Result<usize> {
+        if let Some(ref mut stream) = self.stream {
+            match self.needs_ack {
+                NeedsAck::Yes => Self::handle_send_ack(stream, &self.temp_string.clone(), dest),
+                NeedsAck::No => stream.read(dest),
+            }
+        } else {
+            Err(io::Error::new(io::ErrorKind::Other, "No connection with a server."))
+        }
+    }
+
+    fn validate_checksum(data: &[u8], len: usize) -> io::Result<usize> {
+        // - 3 to skip $xx in the end
+        let data_len = len;
+        let checksum = calc_checksum(&data[1..len]);
+        let data_check = from_pair_hex((data[data_len - 2], data[data_len - 1]));
+
+        if data_check == checksum {
+            Ok((data_len))
+        } else {
+            Err(io::Error::new(io::ErrorKind::Other, "Checksum missmatch for data"))
+        }
+    }
+
+    pub fn send_command_wait_reply_raw(&mut self, res: &mut [u8], command: &str) -> io::Result<usize> {
+        let mut temp_buffer = [0; PACKET_SIZE];
+        try!(self.send_command(command));
+        let len = try!(self.read_reply(&mut temp_buffer));
+        try!(Self::validate_checksum(&temp_buffer, len));
+        // skip start and checksum data
+        res.clone_from_slice(&temp_buffer[1..len-3]);
+        Ok((len - 3))
+    }
+
 
     //pub fn send_no_ack_request(&mut self)-> io::Result<usize> {
     //}
@@ -195,15 +257,74 @@ impl GdbRemote {
     }
     */
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-#[test]
-fn test_checksum_calc() {
-    let data: [u8; 8] = [32, 32, 32, 32, 64, 64, 64, 64];
-    assert_eq!(GdbRemote::calc_checksum(&data), 128);
-}
+    #[test]
+    fn test_checksum_calc() {
+        let data: [u8; 8] = [32, 32, 32, 32, 64, 64, 64, 64];
+        assert_eq!(::calc_checksum(&data), 128);
+    }
 
-#[test]
-fn test_process_string() {
-    assert_eq!(GdbRemote::get_processed_string("f"), "$f#66");
+    #[test]
+    fn test_process_string() {
+        let mut dest = String::new();
+        GdbRemote::build_processed_string(&mut dest, "f");
+        assert_eq!(dest, "$f#66");
+    }
+
+    fn check_mutex_complete(mutex: &Arc<Mutex<u32>>) -> bool {
+        let data = mutex.lock().unwrap();
+        if *data == 1 { true } else { false }
+    }
+
+    fn update_mutex(mutex: &Arc<Mutex<u32>>, value: u32) {
+        let mut data = mutex.lock().unwrap();
+        *data = value
+    }
+
+    fn wait_for_thread_init(mutex: &Arc<Mutex<u32>>) {
+        loop {
+            if check_mutex_complete(mutex) {
+                return;
+            }
+
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn test_connect() {
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+
+        thread::spawn(move || {
+            let listener = TcpListener::bind("127.0.0.1:6860").unwrap();
+            update_mutex(&thread_lock, 1);
+
+            loop {
+                for stream in listener.incoming() {
+                    match stream {
+                        Ok(_stream) => {
+                            // do more stuff in here 
+                        }
+
+                        _ => (),
+                    }
+                }
+            }
+        });
+
+        // make sure we have spawned the server before we go on
+        wait_for_thread_init(&lock);
+        let mut gdb = GdbRemote::new();
+        gdb.connect("127.0.0.1:6860").unwrap();
+    }
 }
 
