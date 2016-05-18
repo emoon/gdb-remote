@@ -1,4 +1,4 @@
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::io::{Read, Write};
 use std::io;
 use std::time::Duration;
@@ -104,7 +104,7 @@ impl GdbRemote {
     }
     */
 
-    pub fn connect(&mut self, addr: &str) -> io::Result<()> {
+    pub fn connect<A: ToSocketAddrs>(&mut self, addr: A) -> io::Result<()> {
         let stream = try!(TcpStream::connect(addr));
         try!(stream.set_read_timeout(Some(Duration::from_secs(2))));
         self.stream = Some(stream);
@@ -137,7 +137,7 @@ impl GdbRemote {
         self.send_internal()
     }
 
-    fn handle_send_ack(stream: &mut TcpStream, resend_data: &String, dest: &mut [u8]) -> io::Result<usize> {
+    fn handle_send_ack(stream: &mut TcpStream, resend_data: &str, dest: &mut [u8]) -> io::Result<usize> {
         loop {
             let mut v = [0; 1];
             try!(stream.read(&mut v));
@@ -264,9 +264,9 @@ mod tests {
     use std::io::{Read};
     use std::time::Duration;
 
-    const NOT_STARTED: u32 = 0;
+    //const NOT_STARTED: u32 = 0;
     const STARTED: u32 = 1;
-    const REPLY_SUPPORT: u32 = 2;
+    //const REPLY_SUPPORT: u32 = 2;
 
     #[test]
     fn test_checksum_calc() {
@@ -305,8 +305,8 @@ mod tests {
         }
     }
 
-    fn setup_listener(server_lock: &Arc<Mutex<u32>>, state: u32) {
-        let listener = TcpListener::bind("127.0.0.1:6860").unwrap();
+    fn setup_listener(server_lock: &Arc<Mutex<u32>>, state: u32, port: u16) {
+        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
         update_mutex(&server_lock, state as u32);
 
         loop {
@@ -327,26 +327,28 @@ mod tests {
 
     #[test]
     fn test_connect() {
+        let port = 6860u16;
         let lock = Arc::new(Mutex::new(0));
         let thread_lock = lock.clone();
 
-        thread::spawn(move || { setup_listener(&thread_lock, STARTED) });
+        thread::spawn(move || { setup_listener(&thread_lock, STARTED, port) });
         wait_for_thread_init(&lock);
 
         let mut gdb = GdbRemote::new();
-        gdb.connect("127.0.0.1:6860").unwrap();
+        gdb.connect(("127.0.0.1", port)).unwrap();
     }
 
     #[test]
     fn test_qsupported() {
+        let port = 6861u16;
         let lock = Arc::new(Mutex::new(0));
         let thread_lock = lock.clone();
 
-        thread::spawn(move || { setup_listener(&thread_lock, STARTED) });
+        thread::spawn(move || { setup_listener(&thread_lock, STARTED, port) });
         wait_for_thread_init(&lock);
 
         let mut gdb = GdbRemote::new();
-        gdb.connect("127.0.0.1:6860").unwrap();
+        gdb.connect(("127.0.0.1", port)).unwrap();
     }
 }
 
