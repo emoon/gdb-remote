@@ -296,6 +296,10 @@ mod tests {
         String::from_utf8_lossy(&buffer[0..size]).into_owned()
     }
 
+    fn get_string_from_buf_trim(buffer: &[u8], size: usize) -> String {
+        String::from_utf8_lossy(&buffer[1..size-3]).into_owned()
+    }
+
     fn server(mut stream: TcpStream, state: &Arc<Mutex<u32>>) {
         let mut buffer = [0; 1024];
         let value = get_mutex_value(state);
@@ -305,7 +309,7 @@ mod tests {
         }
 
         let len = stream.read(&mut buffer).unwrap();
-        let data = get_string_from_buf(&buffer, len);
+        let data = get_string_from_buf_trim(&buffer, len);
 
         println!("data {}", data);
 
