@@ -21,6 +21,7 @@ pub struct GdbRemote {
     stream: Option<TcpStream>,
     temp_string: String,
     needs_ack: NeedsAck,
+    hex_to_byte: [u8; 256],
 }
 
 pub struct Memory {
@@ -68,6 +69,14 @@ fn from_hex(ch: u8) -> u8 {
     0
 }
 
+fn build_hex_to_byte_table() -> [u8; 256] {
+    let mut table = [0; 256];
+    for i in 0..256 {
+        table[i] = from_hex(i as u8)
+    }
+    table
+}
+
 fn from_pair_hex(data: (u8, u8)) -> u8 {
     let t0 = from_hex(data.0);
     let t1 = from_hex(data.1);
@@ -80,6 +89,7 @@ impl GdbRemote {
             needs_ack: NeedsAck::Yes,
             temp_string: String::with_capacity(PACKET_SIZE + 4), // + 4 for header and checksum
             stream: None,
+            hex_to_byte: build_hex_to_byte_table(),
         }
     }
 
@@ -161,11 +171,12 @@ impl GdbRemote {
         }
     }
 
-    fn convert_hex_data_to_binary(dest: &mut [u8], src: &[u8], len: usize) {
-        for i in 0..len {
-            let v0 = src[(i * 2) + 0];
-            let v1 = src[(i * 2) + 1];
-            dest[i] = (from_hex(v0) << 4) | (from_hex(v1));
+    #[no_mangle]
+    pub fn convert_hex_data_to_binary(&self, dest: &mut [u8], src: &[u8], _len: usize) {
+        for (d, s) in dest.iter_mut().zip(src.chunks(2)) {
+            let v0 = s[0] as usize; 
+            let v1 = s[1] as usize;
+            *d = (self.hex_to_byte[v0] << 4) | self.hex_to_byte[v1];
         }
     }
 
@@ -174,10 +185,8 @@ impl GdbRemote {
         try!(self.send_command(command));
         let len = try!(self.read_reply(&mut temp_buffer));
         try!(Self::validate_checksum(&temp_buffer, len));
-        Self::clone_slice(res, &temp_buffer[1..len-3]);
-        let t = String::from_utf8_lossy(&res).into_owned();
-        println!("clone from slice {} - len {}", t, len-4);
-        Ok((len-4))
+        Self::clone_slice(res, &temp_buffer[1..len - 3]);
+        Ok((len - 4))
     }
 
     pub fn get_supported(&mut self, res: &mut [u8]) -> io::Result<usize> {
@@ -193,7 +202,7 @@ impl GdbRemote {
         let len = try!(self.send_command_wait_reply_raw(&mut temp_buffer, "g"));
         let t = String::from_utf8_lossy(&temp_buffer).into_owned();
         println!("get_regs {} len {}", t, len);
-        Self::convert_hex_data_to_binary(res, &temp_buffer, len);
+        self.convert_hex_data_to_binary(res, &temp_buffer, len);
         Ok((len / 2))
     }
 
