@@ -176,7 +176,7 @@ impl GdbRemote {
         try!(Self::validate_checksum(&temp_buffer, len));
         Self::clone_slice(res, &temp_buffer[1..len-3]);
         let t = String::from_utf8_lossy(&res).into_owned();
-        println!("clone from slice {} - len {}", t, len);
+        println!("clone from slice {} - len {}", t, len-4);
         Ok((len-4))
     }
 
@@ -293,7 +293,7 @@ mod tests {
     }
 
     fn get_string_from_buf(buffer: &[u8], size: usize) -> String {
-        String::from_utf8_lossy(&buffer[1..size-3]).into_owned()
+        String::from_utf8_lossy(&buffer[0..size]).into_owned()
     }
 
     fn server(mut stream: TcpStream, state: &Arc<Mutex<u32>>) {
@@ -361,6 +361,8 @@ mod tests {
         let mut gdb = GdbRemote::new();
         gdb.connect(("127.0.0.1", port)).unwrap();
         let size = gdb.get_supported(&mut res).unwrap();
+
+        println!("{:x}", res[0]);
 
         let supported = get_string_from_buf(&res, size);
 
