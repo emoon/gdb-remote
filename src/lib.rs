@@ -71,8 +71,8 @@ fn from_hex(ch: u8) -> u8 {
 
 fn build_hex_to_byte_table() -> [u8; 256] {
     let mut table = [0; 256];
-    for i in 0..256 {
-        table[i] = from_hex(i as u8)
+    for (i, item) in table.iter_mut().enumerate().take(256) {
+        *item = from_hex(i as u8)
     }
     table
 }
@@ -172,9 +172,9 @@ impl GdbRemote {
     }
 
     #[no_mangle]
-    pub fn convert_hex_data_to_binary(&self, dest: &mut [u8], src: &[u8], _len: usize) {
+    pub fn convert_hex_data_to_binary(&self, dest: &mut [u8], src: &[u8]) {
         for (d, s) in dest.iter_mut().zip(src.chunks(2)) {
-            let v0 = s[0] as usize; 
+            let v0 = s[0] as usize;
             let v1 = s[1] as usize;
             *d = (self.hex_to_byte[v0] << 4) | self.hex_to_byte[v1];
         }
@@ -200,37 +200,61 @@ impl GdbRemote {
     pub fn get_registers(&mut self, res: &mut [u8]) -> io::Result<usize> {
         let mut temp_buffer = [0; PACKET_SIZE];
         let len = try!(self.send_command_wait_reply_raw(&mut temp_buffer, "g"));
-        let t = String::from_utf8_lossy(&temp_buffer).into_owned();
-        println!("get_regs {} len {}", t, len);
-        self.convert_hex_data_to_binary(res, &temp_buffer, len);
+        self.convert_hex_data_to_binary(res, &temp_buffer[0..len]);
         Ok((len / 2))
     }
 
-    /*
-    pub fn get_memory_sync(&mut self, address: u64, size: u64) -> io::Result<usize> {
-        let mem_req = format!("m{:x},{:x}", address, size);
+    pub fn get_memory(&mut self, dest: &mut Vec<u8>, address: u32, size: u32) -> io::Result<usize> {
+        let mut temp_buffer = [0; PACKET_SIZE];
+        let mut temp_unpack = [0; PACKET_SIZE/2];
 
-        if let Some(data) = self.send_command_sync(&mem_req) {
-            let mut memory = Vec::with_capacity((data.len() - 2) / 2);
-            let mut index = 1;
+        if size == 0 {
+            return Ok((0));
+        }
 
-            for _ in 0..((data.len() - 2) / 2) {
-                let v0 = data[index + 0];
-                let v1 = data[index + 1];
-                let v = (Self::from_hex(v0) << 4) | (Self::from_hex(v1));
-                memory.push(v);
-                index += 2;
+        dest.clear();
+
+        // Text hexdata and 4 bytes of header bytes gives this max amount of requested data / loop
+        let size_per_loop = ((PACKET_SIZE - 4) / 2) as u32;
+        let mut data_size = size;
+        let mut addr = address;
+        let mut trans_size = 0u32;
+
+        loop {
+            let current_size = if data_size < size_per_loop { data_size } else { size_per_loop };
+
+            // TODO: This allocates memory, would be nice to format to existing string.
+            let mem_req = format!("m{:x},{:x}", addr, current_size);
+
+            let len = try!(self.send_command_wait_reply_raw(&mut temp_buffer, &mem_req));
+
+            if temp_buffer[0] == b'E' {
+                // Ok, something went wrong here. If we have already got some data we just
+                // return what we got (it might be the case that some of the data was ok
+                // to read but the other data wasn't (un-mapped memory for example)
+                if trans_size == 0 {
+                    return Err(io::Error::new(io::ErrorKind::Other, "Unable to read memory"))
+                } else {
+                    return Ok(trans_size as usize);
+                }
             }
 
-            Some(Memory {
-                address: address as u64,
-                data: memory,
-            })
-        } else {
-            None
+            self.convert_hex_data_to_binary(&mut temp_unpack, &temp_buffer[0..len]);
+            dest.extend_from_slice(&temp_unpack[0..len/2]);
+
+            // Bump size and prepare for next chunk
+
+            data_size -= current_size;
+            addr += current_size;
+            trans_size += current_size;
+
+            if data_size == 0 {
+                break;
+            }
         }
+
+        Ok(trans_size as usize)
     }
-    */
 }
 #[cfg(test)]
 mod tests {
@@ -320,7 +344,7 @@ mod tests {
         let len = stream.read(&mut buffer).unwrap();
         let data = get_string_from_buf_trim(&buffer, len);
 
-        println!("data {}", data);
+        //println!("data {}", data);
 
         match data.as_ref() {
             "qSupported" => {
