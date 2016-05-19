@@ -83,32 +83,11 @@ impl GdbRemote {
         }
     }
 
-    /*
-    fn read_write_data(reader: &Receiver<Vec<u8>>, writer: &Sender<Vec<u8>>, stream: &mut TcpStream) -> io::Result<()> {
-        match reader.recv() {
-            Ok(data) => {
-                // TODO: Less allocs
-                let mut buffer = [0; 1024];
-                let mut t = Vec::new();
-                try!(stream.write_all(&data.into_boxed_slice()));
-                let len = try!(stream.read(&mut buffer));
-                for i in 0..len { t.push(buffer[i]); }
-                match writer.send(t) {
-                    Ok(()) => Ok(()),
-                    Err(_) => Err(io::Error::new(io::ErrorKind::Other, "channel write failed")),
-                }
-            }
-
-            Err(_) => Err(io::Error::new(io::ErrorKind::Other, "channel reade error")),
-        }
-    }
-    */
-
     pub fn connect<A: ToSocketAddrs>(&mut self, addr: A) -> io::Result<()> {
         let stream = try!(TcpStream::connect(addr));
+        // 2 sec of time-out to make sure we never gets infitite blocked
         try!(stream.set_read_timeout(Some(Duration::from_secs(2))));
         self.stream = Some(stream);
-        // 2 sec of time-out to make sure we never gets infitite blocked
         Ok(())
     }
 
@@ -163,10 +142,16 @@ impl GdbRemote {
         }
     }
 
+    fn clone_slice(dst: &mut [u8], src: &[u8]) {
+        for (d, s) in dst.iter_mut().zip(src.iter()) {
+            *d = *s;
+        }
+    }
+
     fn validate_checksum(data: &[u8], len: usize) -> io::Result<usize> {
         // - 3 to skip $xx in the end
         let data_len = len;
-        let checksum = calc_checksum(&data[1..len]);
+        let checksum = calc_checksum(&data[1..len - 3]);
         let data_check = from_pair_hex((data[data_len - 2], data[data_len - 1]));
 
         if data_check == checksum {
@@ -176,61 +161,44 @@ impl GdbRemote {
         }
     }
 
+    fn convert_hex_data_to_binary(dest: &mut [u8], src: &[u8], len: usize) {
+        for i in 0..len {
+            let v0 = src[(i * 2) + 0];
+            let v1 = src[(i * 2) + 1];
+            dest[i] = (from_hex(v0) << 4) | (from_hex(v1));
+        }
+    }
+
     pub fn send_command_wait_reply_raw(&mut self, res: &mut [u8], command: &str) -> io::Result<usize> {
         let mut temp_buffer = [0; PACKET_SIZE];
         try!(self.send_command(command));
         let len = try!(self.read_reply(&mut temp_buffer));
         try!(Self::validate_checksum(&temp_buffer, len));
-        // skip start and checksum data
-        res.clone_from_slice(&temp_buffer[1..len-3]);
-        Ok((len - 3))
+        Self::clone_slice(res, &temp_buffer[1..len-3]);
+        let t = String::from_utf8_lossy(&res).into_owned();
+        println!("clone from slice {} - len {}", t, len);
+        Ok((len-4))
     }
 
     pub fn get_supported(&mut self, res: &mut [u8]) -> io::Result<usize> {
         self.send_command_wait_reply_raw(res, "qSupported")
     }
 
+    pub fn step_sync(&mut self, res: &mut [u8]) -> io::Result<usize> {
+        self.send_command_wait_reply_raw(res, "s")
+    }
 
-    //pub fn send_no_ack_request(&mut self)-> io::Result<usize> {
-    //}
+    pub fn get_registers(&mut self, res: &mut [u8]) -> io::Result<usize> {
+        let mut temp_buffer = [0; PACKET_SIZE];
+        let len = try!(self.send_command_wait_reply_raw(&mut temp_buffer, "g"));
+        let t = String::from_utf8_lossy(&temp_buffer).into_owned();
+        println!("get_regs {} len {}", t, len);
+        Self::convert_hex_data_to_binary(res, &temp_buffer, len);
+        Ok((len / 2))
+    }
 
     /*
-    pub fn get_data_sync(&mut self) -> Option<Vec<u8>> {
-        match self.reader.recv() {
-            Ok(data) => {
-                self.temp_data.clear();
-                for i in &data { self.temp_data.push(*i) }
-                Some(self.temp_data.clone())
-            }
-
-            Err(_) => None,
-        }
-    }
-
-    pub fn send_command_sync(&mut self, command: &str) -> Option<Vec<u8>> {
-        if self.get_state() == State::Connected {
-            self.send_command(command).unwrap();
-            println!("waiting for data");
-            let data = self.get_data_sync();
-            println!("got data {}", data.as_ref().unwrap().len());
-            data
-        } else {
-            None
-        }
-    }
-
-    pub fn step_sync(&mut self) -> Option<Vec<u8>> {
-        self.send_command_sync("s")
-    }
-
-    pub fn get_registers_sync(&mut self) -> Option<Vec<u8>> {
-        self.send_command_sync("g")
-    }
-    */
-
-    /*
-    // TODO: 64-bit addresses
-    pub fn get_memory_sync(&mut self, address: u32, size: u32) -> Option<Memory> {
+    pub fn get_memory_sync(&mut self, address: u64, size: u64) -> io::Result<usize> {
         let mem_req = format!("m{:x},{:x}", address, size);
 
         if let Some(data) = self.send_command_sync(&mem_req) {
@@ -261,11 +229,13 @@ mod tests {
     use std::thread;
     use std::net::{TcpStream, TcpListener};
     use std::sync::{Arc, Mutex};
-    use std::io::{Read};
+    use std::io::{Read, Write};
     use std::time::Duration;
 
     //const NOT_STARTED: u32 = 0;
     const STARTED: u32 = 1;
+    const READ_DATA: u32 = 2;
+    const SHOULD_QUIT: u32 = 3;
     //const REPLY_SUPPORT: u32 = 2;
 
     #[test]
@@ -312,17 +282,57 @@ mod tests {
         loop {
             for stream in listener.incoming() {
                 match stream {
-                    Ok(stream) => server(stream, server_lock),
+                    Ok(stream) => {
+                        server(stream, server_lock);
+                        return;
+                    }
                     _ => (),
                 }
             }
         }
     }
 
+    fn get_string_from_buf(buffer: &[u8], size: usize) -> String {
+        String::from_utf8_lossy(&buffer[1..size-3]).into_owned()
+    }
+
     fn server(mut stream: TcpStream, state: &Arc<Mutex<u32>>) {
         let mut buffer = [0; 1024];
-        let _value = get_mutex_value(state);
-        stream.read(&mut buffer).unwrap();
+        let value = get_mutex_value(state);
+
+        if value == STARTED {
+            return;
+        }
+
+        let len = stream.read(&mut buffer).unwrap();
+        let data = get_string_from_buf(&buffer, len);
+
+        println!("data {}", data);
+
+        match data.as_ref() {
+            "qSupported" => {
+                let mut dest = String::new();
+                GdbRemote::build_processed_string(&mut dest, "PacketSize=1fff");
+                stream.write(b"+").unwrap(); // reply that we got the package
+                stream.write_all(dest.as_bytes()).unwrap();
+            }
+
+            "g" => {
+                let mut dest = String::new();
+                GdbRemote::build_processed_string(&mut dest, "1122aa");
+                stream.write(b"+").unwrap(); // reply that we got the package
+                stream.write_all(dest.as_bytes()).unwrap();
+            }
+            _ => (),
+        }
+
+        loop {
+            if get_mutex_value(state) == SHOULD_QUIT {
+                break;
+            }
+
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -340,15 +350,45 @@ mod tests {
 
     #[test]
     fn test_qsupported() {
+        let mut res = [0; 1024];
         let port = 6861u16;
         let lock = Arc::new(Mutex::new(0));
         let thread_lock = lock.clone();
 
-        thread::spawn(move || { setup_listener(&thread_lock, STARTED, port) });
+        thread::spawn(move || { setup_listener(&thread_lock, READ_DATA, port) });
         wait_for_thread_init(&lock);
 
         let mut gdb = GdbRemote::new();
         gdb.connect(("127.0.0.1", port)).unwrap();
+        let size = gdb.get_supported(&mut res).unwrap();
+
+        let supported = get_string_from_buf(&res, size);
+
+        assert_eq!(supported, "PacketSize=1fff");
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
+
+    #[test]
+    fn test_registers() {
+        let mut res = [0; 1024];
+        let port = 6862u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+        thread::spawn(move || { setup_listener(&thread_lock, READ_DATA, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.connect(("127.0.0.1", port)).unwrap();
+        let size = gdb.get_registers(&mut res).unwrap();
+
+        assert_eq!(res[0], 0x11);
+        assert_eq!(res[1], 0x22);
+        assert_eq!(res[2], 0xaa);
+        assert_eq!(size, 3);
+
+        update_mutex(&lock, SHOULD_QUIT);
     }
 }
 
