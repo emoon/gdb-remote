@@ -544,6 +544,24 @@ mod tests {
         update_mutex(&lock, SHOULD_QUIT);
     }
 
+    #[test]
+    fn test_default_zero_mem() {
+        let mut res = Vec::<u8>::with_capacity(2048);
+        let port = 6866u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+        thread::spawn(move || { setup_listener(&thread_lock, READ_DATA, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::default();
+        gdb.connect(("127.0.0.1", port)).unwrap();
+        assert_eq!(gdb.get_memory(&mut res, 0, 0).is_ok(), true);
+        assert_eq!(gdb.is_connected(), true);
+        assert_eq!(res.len(), 0);
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
 
     #[test]
     fn test_parse_memory_1() {
