@@ -164,9 +164,14 @@ impl GdbRemote {
         let checksum = calc_checksum(&data[1..len - 3]);
         let data_check = from_pair_hex((data[data_len - 2], data[data_len - 1]));
 
+        let data_string_got = String::from_utf8_lossy(&data[0..len]).into_owned();
+
+        println!("Data got {}", data_string_got);
+
         if data_check == checksum {
             Ok((data_len))
         } else {
+            println!("missmatch checksum {} - {}", data_check, checksum);
             Err(io::Error::new(io::ErrorKind::Other, "Checksum missmatch for data"))
         }
     }
@@ -204,7 +209,7 @@ impl GdbRemote {
         Ok((len / 2))
     }
 
-    pub fn get_memory(&mut self, dest: &mut Vec<u8>, address: u32, size: u32) -> io::Result<usize> {
+    pub fn get_memory(&mut self, dest: &mut Vec<u8>, address: u64, size: u64) -> io::Result<usize> {
         let mut temp_buffer = [0; PACKET_SIZE];
         let mut temp_unpack = [0; PACKET_SIZE/2];
 
@@ -215,15 +220,16 @@ impl GdbRemote {
         dest.clear();
 
         // Text hexdata and 4 bytes of header bytes gives this max amount of requested data / loop
-        let size_per_loop = ((PACKET_SIZE - 4) / 2) as u32;
+        let size_per_loop = ((PACKET_SIZE - 4) / 2) as u64;
         let mut data_size = size;
         let mut addr = address;
-        let mut trans_size = 0u32;
+        let mut trans_size = 0u64;
 
         loop {
             let current_size = if data_size < size_per_loop { data_size } else { size_per_loop };
 
             // TODO: This allocates memory, would be nice to format to existing string.
+
             let mem_req = format!("m{:x},{:x}", addr, current_size);
 
             let len = try!(self.send_command_wait_reply_raw(&mut temp_buffer, &mem_req));
@@ -264,6 +270,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::io::{Read, Write};
     use std::time::Duration;
+    use std::str;
 
     //const NOT_STARTED: u32 = 0;
     const STARTED: u32 = 1;
@@ -333,34 +340,33 @@ mod tests {
         String::from_utf8_lossy(&buffer[1..size-3]).into_owned()
     }
 
+    fn parse_memory_req(req: &String) -> (usize, usize) {
+        let split: Vec<&str> = req[1..].split(',').collect();
+        let addr = usize::from_str_radix(split[0], 16).unwrap();
+        let size = usize::from_str_radix(split[1], 16).unwrap();
+        (addr, size)
+    }
+
+    fn convert_binary_to_hex_data(dest: &mut [u8], src: &[u8]) {
+        for (d, s) in dest.chunks_mut(2).zip(src.iter()) {
+            d[0] = ::HEX_CHARS[(s >> 4) as usize];
+            d[1] = ::HEX_CHARS[(s & 0xf) as usize];
+        }
+    }
+
     fn server(mut stream: TcpStream, state: &Arc<Mutex<u32>>) {
+        let mut temp_send_data = [0; 4096];
         let mut buffer = [0; 1024];
         let value = get_mutex_value(state);
 
-        if value == STARTED {
-            return;
+        // fill in some temp_data used for sending
+
+        for (i, item) in temp_send_data.iter_mut().enumerate().take(4096) {
+            *item = (i & 0xff) as u8;
         }
 
-        let len = stream.read(&mut buffer).unwrap();
-        let data = get_string_from_buf_trim(&buffer, len);
-
-        //println!("data {}", data);
-
-        match data.as_ref() {
-            "qSupported" => {
-                let mut dest = String::new();
-                GdbRemote::build_processed_string(&mut dest, "PacketSize=1fff");
-                stream.write(b"+").unwrap(); // reply that we got the package
-                stream.write_all(dest.as_bytes()).unwrap();
-            }
-
-            "g" => {
-                let mut dest = String::new();
-                GdbRemote::build_processed_string(&mut dest, "1122aa");
-                stream.write(b"+").unwrap(); // reply that we got the package
-                stream.write_all(dest.as_bytes()).unwrap();
-            }
-            _ => (),
+        if value == STARTED {
+            return;
         }
 
         loop {
@@ -368,7 +374,45 @@ mod tests {
                 break;
             }
 
-            thread::sleep(Duration::from_millis(10));
+            let len = stream.read(&mut buffer).unwrap();
+
+            if len == 0 {
+                continue;
+            }
+
+            let data = get_string_from_buf_trim(&buffer, len);
+
+            match data.as_ref() {
+                "qSupported" => {
+                    let mut dest = String::new();
+                    GdbRemote::build_processed_string(&mut dest, "PacketSize=1fff");
+                    stream.write(b"+").unwrap(); // reply that we got the package
+                    stream.write_all(dest.as_bytes()).unwrap();
+                }
+
+                _ => {
+                    match buffer[1] {
+                        b'm' => {
+                            let mut dest = String::new();
+                            let (addr, size) = parse_memory_req(&data);
+                            convert_binary_to_hex_data(&mut buffer, &temp_send_data[addr..size]);
+                            // * 2 in size here because converted from binary -> hex
+                            GdbRemote::build_processed_string(&mut dest, str::from_utf8(&buffer[..size*2]).unwrap());
+                            stream.write(b"+").unwrap(); // reply that we got the package
+                            stream.write_all(dest.as_bytes()).unwrap();
+                        },
+
+                        b'g' => {
+                            let mut dest = String::new();
+                            GdbRemote::build_processed_string(&mut dest, "1122aa");
+                            stream.write(b"+").unwrap(); // reply that we got the package
+                            stream.write_all(dest.as_bytes()).unwrap();
+                        }
+
+                        _ => (),
+                    }
+                }
+            }
         }
     }
 
@@ -399,8 +443,6 @@ mod tests {
         gdb.connect(("127.0.0.1", port)).unwrap();
         let size = gdb.get_supported(&mut res).unwrap();
 
-        println!("{:x}", res[0]);
-
         let supported = get_string_from_buf(&res, size);
 
         assert_eq!(supported, "PacketSize=1fff");
@@ -428,6 +470,54 @@ mod tests {
         assert_eq!(size, 3);
 
         update_mutex(&lock, SHOULD_QUIT);
+    }
+
+    #[test]
+    fn test_memory() {
+        let mut res = Vec::<u8>::with_capacity(1024);
+        let port = 6863u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+        thread::spawn(move || { setup_listener(&thread_lock, READ_DATA, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.connect(("127.0.0.1", port)).unwrap();
+        let size = gdb.get_memory(&mut res, 0, 128).unwrap();
+
+        assert_eq!(size, 128);
+
+        for (i, item) in res.iter().enumerate().take(128) {
+            assert_eq!(i as u8, *item as u8);
+        }
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
+
+    #[test]
+    fn test_parse_memory_1() {
+        let data = "m77,22".to_owned();
+        let (addr, size) = parse_memory_req(&data);
+        assert_eq!(addr, 0x77);
+        assert_eq!(size, 0x22);
+    }
+
+    #[test]
+    fn test_parse_memory_2() {
+        let data = "m1177,875".to_owned();
+        let (addr, size) = parse_memory_req(&data);
+        assert_eq!(addr, 0x1177);
+        assert_eq!(size, 0x875);
+    }
+
+    #[test]
+    fn convert_binary_to_hex_data_test() {
+        let t = [0x11, 0x23, 0xab];
+        let mut res = [0; 6];
+        convert_binary_to_hex_data(&mut res, &t);
+        let s = get_string_from_buf(&res, 6);
+        assert_eq!("1123ab", s);
     }
 }
 
