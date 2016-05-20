@@ -18,7 +18,7 @@ pub enum State {
 }
 
 pub struct GdbRemote {
-    stream: Option<TcpStream>,
+    pub stream: Option<TcpStream>,
     temp_string: String,
     needs_ack: NeedsAck,
     hex_to_byte: [u8; 256],
@@ -117,7 +117,7 @@ impl GdbRemote {
         if let Some(ref mut stream) = self.stream {
             stream.write_all(self.temp_string.as_bytes())
         } else {
-            Err(io::Error::new(io::ErrorKind::Other, "No connection with a server."))
+            Err(io::Error::new(io::ErrorKind::NotConnected, "No connection with a server."))
         }
     }
 
@@ -135,7 +135,7 @@ impl GdbRemote {
                 b'+' => return stream.read(dest),
                 b'-' => try!(stream.write_all(resend_data.as_bytes())),
                 _ => {
-                    return Err(io::Error::new(io::ErrorKind::Other, "Illegal reply from server."))
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Illegal reply from server."))
                 }
             }
         }
@@ -148,40 +148,7 @@ impl GdbRemote {
                 NeedsAck::No => stream.read(dest),
             }
         } else {
-            Err(io::Error::new(io::ErrorKind::Other, "No connection with a server."))
-        }
-    }
-
-    fn clone_slice(dst: &mut [u8], src: &[u8]) {
-        for (d, s) in dst.iter_mut().zip(src.iter()) {
-            *d = *s;
-        }
-    }
-
-    fn validate_checksum(data: &[u8], len: usize) -> io::Result<usize> {
-        // - 3 to skip $xx in the end
-        let data_len = len;
-        let checksum = calc_checksum(&data[1..len - 3]);
-        let data_check = from_pair_hex((data[data_len - 2], data[data_len - 1]));
-
-        let data_string_got = String::from_utf8_lossy(&data[0..len]).into_owned();
-
-        println!("Data got {}", data_string_got);
-
-        if data_check == checksum {
-            Ok((data_len))
-        } else {
-            println!("missmatch checksum {} - {}", data_check, checksum);
-            Err(io::Error::new(io::ErrorKind::Other, "Checksum missmatch for data"))
-        }
-    }
-
-    #[no_mangle]
-    pub fn convert_hex_data_to_binary(&self, dest: &mut [u8], src: &[u8]) {
-        for (d, s) in dest.iter_mut().zip(src.chunks(2)) {
-            let v0 = s[0] as usize;
-            let v1 = s[1] as usize;
-            *d = (self.hex_to_byte[v0] << 4) | self.hex_to_byte[v1];
+            Err(io::Error::new(io::ErrorKind::NotConnected, "No connection with a server."))
         }
     }
 
@@ -189,9 +156,18 @@ impl GdbRemote {
         let mut temp_buffer = [0; PACKET_SIZE];
         try!(self.send_command(command));
         let len = try!(self.read_reply(&mut temp_buffer));
+        // If len returned 0 it means that we got disconnected from the server
+        if len == 0 {
+            self.stream = None;
+            return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "Disconnected from server."));
+        }
         try!(Self::validate_checksum(&temp_buffer, len));
         Self::clone_slice(res, &temp_buffer[1..len - 3]);
         Ok((len - 4))
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.stream.is_some()
     }
 
     pub fn get_supported(&mut self, res: &mut [u8]) -> io::Result<usize> {
@@ -229,7 +205,6 @@ impl GdbRemote {
             let current_size = if data_size < size_per_loop { data_size } else { size_per_loop };
 
             // TODO: This allocates memory, would be nice to format to existing string.
-
             let mem_req = format!("m{:x},{:x}", addr, current_size);
 
             let len = try!(self.send_command_wait_reply_raw(&mut temp_buffer, &mem_req));
@@ -261,6 +236,33 @@ impl GdbRemote {
 
         Ok(trans_size as usize)
     }
+
+    fn clone_slice(dst: &mut [u8], src: &[u8]) {
+        for (d, s) in dst.iter_mut().zip(src.iter()) {
+            *d = *s;
+        }
+    }
+
+    fn validate_checksum(data: &[u8], len: usize) -> io::Result<usize> {
+        // - 3 to skip $xx in the end
+        let data_len = len;
+        let checksum = calc_checksum(&data[1..len - 3]);
+        let data_check = from_pair_hex((data[data_len - 2], data[data_len - 1]));
+
+        if data_check == checksum {
+            Ok((data_len))
+        } else {
+            Err(io::Error::new(io::ErrorKind::Other, "Checksum missmatch for data"))
+        }
+    }
+
+    fn convert_hex_data_to_binary(&self, dest: &mut [u8], src: &[u8]) {
+        for (d, s) in dest.iter_mut().zip(src.chunks(2)) {
+            let v0 = s[0] as usize;
+            let v1 = s[1] as usize;
+            *d = (self.hex_to_byte[v0] << 4) | self.hex_to_byte[v1];
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -275,7 +277,8 @@ mod tests {
     //const NOT_STARTED: u32 = 0;
     const STARTED: u32 = 1;
     const READ_DATA: u32 = 2;
-    const SHOULD_QUIT: u32 = 3;
+    const QUIT_SERVER: u32 = 3;
+    const SHOULD_QUIT: u32 = 4;
     //const REPLY_SUPPORT: u32 = 2;
 
     #[test]
@@ -382,11 +385,17 @@ mod tests {
 
             let data = get_string_from_buf_trim(&buffer, len);
 
+            stream.write(b"+").unwrap(); // reply that we got the package
+            // fake that server decided to go away
+            if value == QUIT_SERVER {
+                thread::sleep(Duration::from_millis(5));
+                return;
+            }
+
             match data.as_ref() {
                 "qSupported" => {
                     let mut dest = String::new();
                     GdbRemote::build_processed_string(&mut dest, "PacketSize=1fff");
-                    stream.write(b"+").unwrap(); // reply that we got the package
                     stream.write_all(dest.as_bytes()).unwrap();
                 }
 
@@ -395,7 +404,6 @@ mod tests {
                         b'm' => {
                             let mut dest = String::new();
                             let (addr, size) = parse_memory_req(&data);
-                            stream.write(b"+").unwrap(); // reply that we got the package
 
                             // Reply error back if we can't read from here
                             if addr >= 4096 {
@@ -412,7 +420,6 @@ mod tests {
                         b'g' => {
                             let mut dest = String::new();
                             GdbRemote::build_processed_string(&mut dest, "1122aa");
-                            stream.write(b"+").unwrap(); // reply that we got the package
                             stream.write_all(dest.as_bytes()).unwrap();
                         }
 
@@ -518,6 +525,25 @@ mod tests {
 
         update_mutex(&lock, SHOULD_QUIT);
     }
+
+    #[test]
+    fn test_memory_server_quit() {
+        let mut res = Vec::<u8>::with_capacity(2048);
+        let port = 6865u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+        thread::spawn(move || { setup_listener(&thread_lock, QUIT_SERVER, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.connect(("127.0.0.1", port)).unwrap();
+        assert_eq!(gdb.get_memory(&mut res, 0, 128).is_err(), true);
+        assert_eq!(gdb.is_connected(), false);
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
+
 
     #[test]
     fn test_parse_memory_1() {
