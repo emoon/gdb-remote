@@ -125,7 +125,10 @@ impl GdbRemote {
 
             match v[0] {
                 b'+' => return stream.read(dest),
-                b'-' => try!(stream.write_all(resend_data.as_bytes())),
+                b'-' => {
+                    println!("retry..");
+                    try!(stream.write_all(resend_data.as_bytes()));
+                }
                 _ => {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, "Illegal reply from server."))
                 }
@@ -282,6 +285,8 @@ mod tests {
     const READ_DATA: u32 = 2;
     const QUIT_SERVER: u32 = 3;
     const SHOULD_QUIT: u32 = 4;
+    const TEST_RESEND: u32 = 5;
+    const TEST_BAD_SERVER_DATA: u32 = 6;
     //const REPLY_SUPPORT: u32 = 2;
 
     #[test]
@@ -374,6 +379,16 @@ mod tests {
 
         if value == STARTED {
             return;
+        }
+
+        if value == TEST_RESEND {
+            stream.read(&mut buffer).unwrap();
+            stream.write(b"-").unwrap();
+        }
+
+        if value == TEST_BAD_SERVER_DATA {
+            stream.read(&mut buffer).unwrap();
+            stream.write(b"s").unwrap();
         }
 
         loop {
@@ -602,6 +617,37 @@ mod tests {
         update_mutex(&lock, SHOULD_QUIT);
     }
 
+    #[test]
+    fn test_memory_test_resend() {
+        let port = 6869u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+        thread::spawn(move || { setup_listener(&thread_lock, TEST_RESEND, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.connect(("127.0.0.1", port)).unwrap();
+        gdb.request_no_ack_mode().unwrap();
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
+
+    #[test]
+    fn test_memory_test_bad_server_data() {
+        let port = 6810u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+        thread::spawn(move || { setup_listener(&thread_lock, TEST_BAD_SERVER_DATA, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.connect(("127.0.0.1", port)).unwrap();
+        assert_eq!(gdb.request_no_ack_mode().is_err(), true);
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
 
     #[test]
     fn test_parse_memory_1() {
