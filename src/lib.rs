@@ -356,7 +356,7 @@ mod tests {
 
     fn server(mut stream: TcpStream, state: &Arc<Mutex<u32>>) {
         let mut temp_send_data = [0; 4096];
-        let mut buffer = [0; 1024];
+        let mut buffer = [0; 2048];
         let value = get_mutex_value(state);
 
         // fill in some temp_data used for sending
@@ -395,7 +395,7 @@ mod tests {
                         b'm' => {
                             let mut dest = String::new();
                             let (addr, size) = parse_memory_req(&data);
-                            convert_binary_to_hex_data(&mut buffer, &temp_send_data[addr..size]);
+                            convert_binary_to_hex_data(&mut buffer, &temp_send_data[addr..addr+size]);
                             // * 2 in size here because converted from binary -> hex
                             GdbRemote::build_processed_string(&mut dest, str::from_utf8(&buffer[..size*2]).unwrap());
                             stream.write(b"+").unwrap(); // reply that we got the package
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn test_memory() {
-        let mut res = Vec::<u8>::with_capacity(1024);
+        let mut res = Vec::<u8>::with_capacity(2048);
         let port = 6863u16;
         let lock = Arc::new(Mutex::new(0));
         let thread_lock = lock.clone();
@@ -484,11 +484,11 @@ mod tests {
 
         let mut gdb = GdbRemote::new();
         gdb.connect(("127.0.0.1", port)).unwrap();
-        let size = gdb.get_memory(&mut res, 0, 128).unwrap();
+        let size = gdb.get_memory(&mut res, 0, 2048).unwrap();
 
-        assert_eq!(size, 128);
+        assert_eq!(size, 2048);
 
-        for (i, item) in res.iter().enumerate().take(128) {
+        for (i, item) in res.iter().enumerate().take(2048) {
             assert_eq!(i as u8, *item as u8);
         }
 
