@@ -3,18 +3,10 @@ use std::io::{Read, Write};
 use std::io;
 use std::time::Duration;
 
+#[derive(PartialEq)]
 pub enum NeedsAck {
     Yes,
     No,
-}
-
-#[derive(Copy, Clone, PartialEq)]
-pub enum State {
-    Disconnected,
-    Connected,
-    SendingData,
-    WaitingForData,
-    Close,
 }
 
 pub struct GdbRemote {
@@ -174,8 +166,19 @@ impl GdbRemote {
         self.send_command_wait_reply_raw(res, "qSupported")
     }
 
-    pub fn step_sync(&mut self, res: &mut [u8]) -> io::Result<usize> {
+    pub fn step(&mut self, res: &mut [u8]) -> io::Result<usize> {
         self.send_command_wait_reply_raw(res, "s")
+    }
+
+    pub fn request_no_ack_mode(&mut self) -> io::Result<usize> {
+        let mut res = [0; PACKET_SIZE];
+        let len = try!(self.send_command_wait_reply_raw(&mut res, "QStartNoAckMode"));
+
+        if res[0] == b'O' && res[1] == b'K' {
+            self.needs_ack = NeedsAck::No;
+        }
+
+        Ok((len))
     }
 
     pub fn get_registers(&mut self, res: &mut [u8]) -> io::Result<usize> {
@@ -361,6 +364,7 @@ mod tests {
         let mut temp_send_data = [0; 4096];
         let mut buffer = [0; 2048];
         let value = get_mutex_value(state);
+        let mut needs_ack = NeedsAck::Yes;
 
         // fill in some temp_data used for sending
 
@@ -385,7 +389,11 @@ mod tests {
 
             let data = get_string_from_buf_trim(&buffer, len);
 
-            stream.write(b"+").unwrap(); // reply that we got the package
+            if needs_ack == NeedsAck::Yes {
+                // reply that we got the package
+                stream.write(b"+").unwrap();
+            }
+
             // fake that server decided to go away
             if value == QUIT_SERVER {
                 thread::sleep(Duration::from_millis(5));
@@ -393,6 +401,13 @@ mod tests {
             }
 
             match data.as_ref() {
+                "QStartNoAckMode" => {
+                    let mut dest = String::new();
+                    GdbRemote::build_processed_string(&mut dest, "OK");
+                    stream.write_all(dest.as_bytes()).unwrap();
+                    needs_ack = NeedsAck::No;
+                },
+
                 "qSupported" => {
                     let mut dest = String::new();
                     GdbRemote::build_processed_string(&mut dest, "PacketSize=1fff");
@@ -562,6 +577,31 @@ mod tests {
 
         update_mutex(&lock, SHOULD_QUIT);
     }
+
+    #[test]
+    fn test_memory_no_ack() {
+        let mut res = Vec::<u8>::with_capacity(2048);
+        let port = 6867u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+        thread::spawn(move || { setup_listener(&thread_lock, READ_DATA, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.connect(("127.0.0.1", port)).unwrap();
+        gdb.request_no_ack_mode().unwrap();
+        let size = gdb.get_memory(&mut res, 0, 2048).unwrap();
+
+        assert_eq!(size, 2048);
+
+        for (i, item) in res.iter().enumerate().take(2048) {
+            assert_eq!(i as u8, *item as u8);
+        }
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
+
 
     #[test]
     fn test_parse_memory_1() {
