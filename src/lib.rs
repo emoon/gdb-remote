@@ -395,11 +395,18 @@ mod tests {
                         b'm' => {
                             let mut dest = String::new();
                             let (addr, size) = parse_memory_req(&data);
-                            convert_binary_to_hex_data(&mut buffer, &temp_send_data[addr..addr+size]);
-                            // * 2 in size here because converted from binary -> hex
-                            GdbRemote::build_processed_string(&mut dest, str::from_utf8(&buffer[..size*2]).unwrap());
                             stream.write(b"+").unwrap(); // reply that we got the package
-                            stream.write_all(dest.as_bytes()).unwrap();
+
+                            // Reply error back if we can't read from here
+                            if addr >= 4096 {
+                                GdbRemote::build_processed_string(&mut dest, "E01");
+                                stream.write_all(dest.as_bytes()).unwrap();
+                            } else {
+                                convert_binary_to_hex_data(&mut buffer, &temp_send_data[addr..addr+size]);
+                                // * 2 in size here because converted from binary -> hex
+                                GdbRemote::build_processed_string(&mut dest, str::from_utf8(&buffer[..size*2]).unwrap());
+                                stream.write_all(dest.as_bytes()).unwrap();
+                            }
                         },
 
                         b'g' => {
@@ -491,6 +498,23 @@ mod tests {
         for (i, item) in res.iter().enumerate().take(2048) {
             assert_eq!(i as u8, *item as u8);
         }
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
+
+    #[test]
+    fn test_memory_error() {
+        let mut res = Vec::<u8>::with_capacity(2048);
+        let port = 6864u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+        thread::spawn(move || { setup_listener(&thread_lock, READ_DATA, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.connect(("127.0.0.1", port)).unwrap();
+        assert_eq!(gdb.get_memory(&mut res, 4096, 128).is_err(), true);
 
         update_mutex(&lock, SHOULD_QUIT);
     }
