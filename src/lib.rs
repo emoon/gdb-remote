@@ -172,6 +172,10 @@ impl GdbRemote {
         self.send_command_wait_reply_raw(res, "s")
     }
 
+    pub fn cont(&mut self) -> io::Result<()> {
+        self.send_command("c")
+    }
+
     pub fn request_no_ack_mode(&mut self) -> io::Result<usize> {
         let mut res = [0; PACKET_SIZE];
         let len = try!(self.send_command_wait_reply_raw(&mut res, "QStartNoAckMode"));
@@ -458,6 +462,10 @@ mod tests {
                             stream.write_all(dest.as_bytes()).unwrap();
                         }
 
+                        b'c' => {
+                            // do nothing for continue
+                        }
+
                         _ => (),
                     }
                 }
@@ -688,6 +696,23 @@ mod tests {
         let mut gdb = GdbRemote::new();
         assert_eq!(gdb.read_reply(&mut res).is_err(), true);
     }
+
+    #[test]
+    fn test_cont() {
+        let port = 6812u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+        thread::spawn(move || { setup_listener(&thread_lock, READ_DATA, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.connect(("127.0.0.1", port)).unwrap();
+        gdb.cont().unwrap();
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
+
 
     #[test]
     fn test_parse_memory_1() {
