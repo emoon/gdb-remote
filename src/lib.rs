@@ -126,7 +126,6 @@ impl GdbRemote {
             match v[0] {
                 b'+' => return stream.read(dest),
                 b'-' => {
-                    println!("retry..");
                     try!(stream.write_all(resend_data.as_bytes()));
                 }
                 _ => {
@@ -453,6 +452,12 @@ mod tests {
                             stream.write_all(dest.as_bytes()).unwrap();
                         }
 
+                        b's' => {
+                            let mut dest = String::new();
+                            GdbRemote::build_processed_string(&mut dest, "S01");
+                            stream.write_all(dest.as_bytes()).unwrap();
+                        }
+
                         _ => (),
                     }
                 }
@@ -649,12 +654,52 @@ mod tests {
         update_mutex(&lock, SHOULD_QUIT);
     }
 
+
+    #[test]
+    fn test_step() {
+        let mut res = [0; 1024];
+        let port = 6811u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+        thread::spawn(move || { setup_listener(&thread_lock, READ_DATA, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.connect(("127.0.0.1", port)).unwrap();
+        let size = gdb.step(&mut res).unwrap();
+
+        let step_reply = get_string_from_buf(&res, size);
+
+        assert_eq!(step_reply, "S01");
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
+
+    #[test]
+    fn test_memory_send_without_connection() {
+        let mut gdb = GdbRemote::new();
+        assert_eq!(gdb.request_no_ack_mode().is_err(), true);
+    }
+
+    #[test]
+    fn test_memory_read_reply_without_connection() {
+        let mut res = [0; 1024];
+        let mut gdb = GdbRemote::new();
+        assert_eq!(gdb.read_reply(&mut res).is_err(), true);
+    }
+
     #[test]
     fn test_parse_memory_1() {
         let data = "m77,22".to_owned();
         let (addr, size) = parse_memory_req(&data);
         assert_eq!(addr, 0x77);
         assert_eq!(size, 0x22);
+    }
+
+    #[test]
+    fn test_validate_mem_wrong_checksum() {
+        assert_eq!(GdbRemote::validate_checksum(b"$some_data#00", 13).is_err(), true);
     }
 
     #[test]
