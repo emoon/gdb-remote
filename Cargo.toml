@@ -2,3 +2,8 @@
 name = "gdb_remote"
 version = "0.1.0"
 authors = ["Daniel Collin <daniel@collin.com>"]
+
+build = "build.rs"
+
+[build-dependencies]
+gcc = "0.3"

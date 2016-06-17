@@ -2,6 +2,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::io::{Read, Write};
 use std::io;
 use std::time::Duration;
+use std::os::unix::io::AsRawFd;
 
 #[derive(PartialEq)]
 pub enum NeedsAck {
@@ -25,6 +26,10 @@ impl Default for GdbRemote {
     fn default() -> Self {
         Self::new()
     }
+}
+
+extern "C" {
+    fn c_poll_socket(socket: i32) -> i32;
 }
 
 const PACKET_SIZE: usize = 1024;
@@ -103,6 +108,17 @@ impl GdbRemote {
         dest.push('#');
         dest.push(csum.0 as char);
         dest.push(csum.1 as char);
+    }
+
+    pub fn has_incoming_data(&mut self) -> bool {
+        let mut t = 0;
+        if let Some(ref mut stream) = self.stream {
+            unsafe {
+                t = c_poll_socket(stream.as_raw_fd());
+            }
+        }
+
+        if t == 1 { true } else { false }
     }
 
     pub fn send_internal(&mut self) -> io::Result<()> {
@@ -290,6 +306,7 @@ mod tests {
     const SHOULD_QUIT: u32 = 4;
     const TEST_RESEND: u32 = 5;
     const TEST_BAD_SERVER_DATA: u32 = 6;
+    const TEST_WAIT_AND_THEN_SEND: u32 = 7;
     //const REPLY_SUPPORT: u32 = 2;
 
     #[test]
@@ -392,6 +409,13 @@ mod tests {
         if value == TEST_BAD_SERVER_DATA {
             stream.read(&mut buffer).unwrap();
             stream.write(b"s").unwrap();
+        }
+
+        if value == TEST_WAIT_AND_THEN_SEND {
+            // Waiting for 300 ms before sending anything
+            thread::sleep(Duration::from_millis(300));
+            stream.write(b"somedata").unwrap();
+            return;
         }
 
         loop {
@@ -713,6 +737,42 @@ mod tests {
         update_mutex(&lock, SHOULD_QUIT);
     }
 
+    #[test]
+    fn test_incoming() {
+        let port = 6813u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+        let mut has_got_data = false;
+        let mut count = 0;
+
+        thread::spawn(move || { setup_listener(&thread_lock, TEST_WAIT_AND_THEN_SEND, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.connect(("127.0.0.1", port)).unwrap();
+
+        loop {
+            if gdb.has_incoming_data() {
+                has_got_data = true;
+                break;
+            }
+
+            count += 1;
+            thread::sleep(Duration::from_millis(1));
+
+            if count > 400 {
+                break;
+            }
+        }
+
+        // we expect here that we have updated count a bit and that we have got data and if time is
+        // above 300 something has went wrong
+
+        assert!(count > 10 && count < 300);
+        assert_eq!(has_got_data, true);
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
 
     #[test]
     fn test_parse_memory_1() {
