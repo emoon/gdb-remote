@@ -2,6 +2,16 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::io::{Read, Write};
 use std::io;
 use std::time::Duration;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::io::AsRawSocket;
+
+#[cfg(any(target_os="linux",
+    target_os="macos",
+    target_os="freebsd",
+    target_os="dragonfly",
+    target_os="netbsd",
+    target_os="openbsd"))]
 use std::os::unix::io::AsRawFd;
 
 #[derive(PartialEq)]
@@ -110,11 +120,27 @@ impl GdbRemote {
         dest.push(csum.1 as char);
     }
 
+    #[cfg(any(target_os="linux",
+        target_os="macos",
+        target_os="freebsd",
+        target_os="dragonfly",
+        target_os="netbsd",
+        target_os="openbsd"))]
+    pub fn get_socket(stream: &mut TcpStream) -> i32 {
+        stream.as_raw_fd() as i32
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn get_socket(stream: &mut TcpStream) -> i32 {
+        stream.as_raw_socket() as i32
+    }
+
+
     pub fn has_incoming_data(&mut self) -> bool {
         let mut t = 0;
         if let Some(ref mut stream) = self.stream {
             unsafe {
-                t = c_poll_socket(stream.as_raw_fd());
+                t = c_poll_socket(Self::get_socket(stream) as i32);
             }
         }
 
