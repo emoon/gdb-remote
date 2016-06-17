@@ -288,6 +288,20 @@ impl GdbRemote {
         Ok(trans_size as usize)
     }
 
+    pub fn set_breakpoint_at_address(&mut self, address: u64) -> io::Result<usize> {
+        let mut temp_buffer = [0; PACKET_SIZE];
+        // TODO: This allocates memory, would be nice to format to existing string.
+        let breakpoint_req = format!("z0,{:x}", address);
+        self.send_command_wait_reply_raw(&mut temp_buffer, &breakpoint_req)
+    }
+
+    pub fn remove_breakpoint_at_address(&mut self, address: u64) -> io::Result<usize> {
+        let mut temp_buffer = [0; PACKET_SIZE];
+        // TODO: This allocates memory, would be nice to format to existing string.
+        let breakpoint_req = format!("Z0,{:x}", address);
+        self.send_command_wait_reply_raw(&mut temp_buffer, &breakpoint_req)
+    }
+
     fn clone_slice(dst: &mut [u8], src: &[u8]) {
         for (d, s) in dst.iter_mut().zip(src.iter()) {
             *d = *s;
@@ -509,6 +523,18 @@ mod tests {
                         b's' => {
                             let mut dest = String::new();
                             GdbRemote::build_processed_string(&mut dest, "S01");
+                            stream.write_all(dest.as_bytes()).unwrap();
+                        }
+
+                        b'z' => {
+                            let mut dest = String::new();
+                            GdbRemote::build_processed_string(&mut dest, "OK");
+                            stream.write_all(dest.as_bytes()).unwrap();
+                        }
+
+                        b'Z' => {
+                            let mut dest = String::new();
+                            GdbRemote::build_processed_string(&mut dest, "OK");
                             stream.write_all(dest.as_bytes()).unwrap();
                         }
 
@@ -796,6 +822,38 @@ mod tests {
 
         assert!(count > 10 && count < 300);
         assert_eq!(has_got_data, true);
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
+
+    #[test]
+    fn test_set_breakpoint() {
+        let port = 6814u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+        thread::spawn(move || { setup_listener(&thread_lock, READ_DATA, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.connect(("127.0.0.1", port)).unwrap();
+        gdb.set_breakpoint_at_address(0x4444).unwrap();
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
+
+    #[test]
+    fn test_remove_breakpoint() {
+        let port = 6815u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+
+        thread::spawn(move || { setup_listener(&thread_lock, READ_DATA, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.connect(("127.0.0.1", port)).unwrap();
+        gdb.remove_breakpoint_at_address(0x4444).unwrap();
 
         update_mutex(&lock, SHOULD_QUIT);
     }
