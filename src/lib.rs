@@ -171,6 +171,7 @@ impl GdbRemote {
                     try!(stream.write_all(resend_data.as_bytes()));
                 }
                 _ => {
+                    println!("illegal reply {} - {} - {:?}", v[0], v[0] as char, v);
                     return Err(io::Error::new(io::ErrorKind::InvalidData, "Illegal reply from server."))
                 }
             }
@@ -214,8 +215,9 @@ impl GdbRemote {
         self.send_command_wait_reply_raw(res, "s")
     }
 
-    pub fn cont(&mut self) -> io::Result<()> {
-        self.send_command("c")
+    pub fn cont(&mut self) -> io::Result<(usize)> {
+        let mut res = [0; 16];
+        self.send_command_wait_reply_raw(&mut res, "c")
     }
 
     pub fn request_no_ack_mode(&mut self) -> io::Result<usize> {
