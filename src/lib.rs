@@ -541,6 +541,9 @@ mod tests {
                         }
 
                         b'c' => {
+                            let mut dest = String::new();
+                            GdbRemote::build_processed_string(&mut dest, "OK");
+                            stream.write_all(dest.as_bytes()).unwrap();
                             // do nothing for continue
                         }
 
