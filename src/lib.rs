@@ -291,14 +291,14 @@ impl GdbRemote {
     pub fn set_breakpoint_at_address(&mut self, address: u64) -> io::Result<usize> {
         let mut temp_buffer = [0; PACKET_SIZE];
         // TODO: This allocates memory, would be nice to format to existing string.
-        let breakpoint_req = format!("z0,{:x}", address);
+        let breakpoint_req = format!("Z0,{:x}", address);
         self.send_command_wait_reply_raw(&mut temp_buffer, &breakpoint_req)
     }
 
     pub fn remove_breakpoint_at_address(&mut self, address: u64) -> io::Result<usize> {
         let mut temp_buffer = [0; PACKET_SIZE];
         // TODO: This allocates memory, would be nice to format to existing string.
-        let breakpoint_req = format!("Z0,{:x}", address);
+        let breakpoint_req = format!("z0,{:x}", address);
         self.send_command_wait_reply_raw(&mut temp_buffer, &breakpoint_req)
     }
 
