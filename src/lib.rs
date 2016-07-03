@@ -1,7 +1,10 @@
+pub mod incoming_result;
+
 use std::net::{TcpStream, ToSocketAddrs};
 use std::io::{Read, Write};
 use std::io;
 use std::time::Duration;
+use incoming_result::IncomingResult;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::io::AsRawSocket;
@@ -22,6 +25,7 @@ pub enum NeedsAck {
 
 pub struct GdbRemote {
     pub stream: Option<TcpStream>,
+    temp_data: Vec<u8>,
     temp_string: String,
     needs_ack: NeedsAck,
     hex_to_byte: [u8; 256],
@@ -95,9 +99,14 @@ impl GdbRemote {
         GdbRemote {
             needs_ack: NeedsAck::Yes,
             temp_string: String::with_capacity(PACKET_SIZE + 4), // + 4 for header and checksum
+            temp_data: Vec::with_capacity(16 * 1024), // 16 temp buffer for incoming data
             stream: None,
             hex_to_byte: build_hex_to_byte_table(),
         }
+    }
+
+    pub fn set_ack(&mut self, ack: NeedsAck) {
+        self.needs_ack = ack;
     }
 
     pub fn connect<A: ToSocketAddrs>(&mut self, addr: A) -> io::Result<()> {
@@ -238,6 +247,40 @@ impl GdbRemote {
         Ok((len / 2))
     }
 
+    pub fn read_incoming_event(&mut self) -> Option<IncomingResult> {
+        let mut size = 0;
+
+        self.temp_data.clear();
+
+        let mut temp_buffer = [0; PACKET_SIZE];
+
+        while self.has_incoming_data() {
+            let len = match self.read_reply(&mut temp_buffer) {
+                Err(e) => {
+                    println!("read_incoming error {:?}", e);
+                    return None;
+                }
+                Ok(len) => len,
+            } as usize;
+
+            if len == 0 {
+                break;
+            }
+
+            self.temp_data.extend_from_slice(&temp_buffer);
+
+            size += len;
+        }
+
+        if size > 0 {
+            Some(IncomingResult {
+                data: &self.temp_data[1..size - 3],
+            })
+        } else {
+            None
+        }
+    }
+
     pub fn get_memory(&mut self, dest: &mut Vec<u8>, address: u64, size: u64) -> io::Result<usize> {
         let mut temp_buffer = [0; PACKET_SIZE];
         let mut temp_unpack = [0; PACKET_SIZE/2];
@@ -349,6 +392,7 @@ mod tests {
     const TEST_RESEND: u32 = 5;
     const TEST_BAD_SERVER_DATA: u32 = 6;
     const TEST_WAIT_AND_THEN_SEND: u32 = 7;
+    const TEST_WAIT_AND_THEN_SEND_LARGE: u32 = 8;
     //const REPLY_SUPPORT: u32 = 2;
 
     #[test]
@@ -457,6 +501,35 @@ mod tests {
             // Waiting for 300 ms before sending anything
             thread::sleep(Duration::from_millis(300));
             stream.write(b"somedata").unwrap();
+            return;
+        }
+
+        if value == TEST_WAIT_AND_THEN_SEND_LARGE {
+            let mut data = Vec::<u8>::new();
+            data.push(b'$');
+            data.push(b'Q');
+            data.push(b'T');
+            data.push(b'e');
+            data.push(b's');
+            data.push(b't');
+
+            for i in 0..16000 {
+                let s = (i & 0xff) as u8;
+                let t0 = ::HEX_CHARS[(s >> 4) as usize];
+                let t1 = ::HEX_CHARS[(s & 0xf) as usize];
+                data.push(t0);
+                data.push(t1);
+            }
+
+            // dummy
+            data.push(b'#');
+            data.push(b'0');
+            data.push(b'0');
+
+            // Waiting for 300 ms before sending anything
+            thread::sleep(Duration::from_millis(500));
+
+            stream.write(&data).unwrap();
             return;
         }
 
@@ -862,6 +935,52 @@ mod tests {
 
         update_mutex(&lock, SHOULD_QUIT);
     }
+
+    #[test]
+    fn test_read_incoming() {
+        let port = 6816u16;
+        let lock = Arc::new(Mutex::new(0));
+        let thread_lock = lock.clone();
+        let mut has_got_data = false;
+        let mut count = 0;
+
+        thread::spawn(move || { setup_listener(&thread_lock, TEST_WAIT_AND_THEN_SEND_LARGE, port) });
+        wait_for_thread_init(&lock);
+
+        let mut gdb = GdbRemote::new();
+        gdb.set_ack(NeedsAck::No);
+        gdb.connect(("127.0.0.1", port)).unwrap();
+
+        loop {
+            if let Some(ref data) = gdb.read_incoming_event() {
+                let data = data.begins_with("QTest").unwrap();
+                has_got_data = true;
+
+                for i in 0..16000 {
+                    let t0 = data[(i * 2) + 0];
+                    let t1 = data[(i * 2) + 1];
+                    let t = ::from_pair_hex((t0, t1));
+                    assert_eq!(t, (i & 0xff) as u8);
+                }
+            }
+
+            count += 1;
+            thread::sleep(Duration::from_millis(1));
+
+            if count > 600 || has_got_data {
+                break;
+            }
+        }
+
+        // we expect here that we have updated count a bit and that we have got data and if time is
+        // above 300 something has went wrong
+
+        assert!(count > 10 && count < 600);
+        assert_eq!(has_got_data, true);
+
+        update_mutex(&lock, SHOULD_QUIT);
+    }
+
 
     #[test]
     fn test_parse_memory_1() {
