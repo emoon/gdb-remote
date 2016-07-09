@@ -366,7 +366,7 @@ impl GdbRemote {
         }
     }
 
-    fn convert_hex_data_to_binary(&self, dest: &mut [u8], src: &[u8]) {
+    pub fn convert_hex_data_to_binary(&self, dest: &mut [u8], src: &[u8]) {
         for (d, s) in dest.iter_mut().zip(src.chunks(2)) {
             let v0 = s[0] as usize;
             let v1 = s[1] as usize;
